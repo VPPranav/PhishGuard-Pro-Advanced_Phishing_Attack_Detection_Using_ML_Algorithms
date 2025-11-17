@@ -467,17 +467,6 @@ bson
 4. Set up reverse proxy (Nginx recommended)
 5. Enable HTTPS with SSL certificates
 
-### Docker Deployment (Optional)
-\`\`\`dockerfile
-FROM python:3.9-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY . .
-EXPOSE 5000
-CMD ["python", "app.py"]
-\`\`\`
-
 ## 📞 Support
 
 For technical support or inquiries:
@@ -493,3 +482,4 @@ This project is developed as an academic/research project. All rights reserved t
 
 **PhishGuard Pro** - Professional Phishing Detection System
 *Protecting organizations from email, url's and web-based threats through advanced AI*
+
