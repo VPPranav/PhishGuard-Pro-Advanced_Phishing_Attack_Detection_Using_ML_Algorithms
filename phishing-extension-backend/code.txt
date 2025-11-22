@@ -1,0 +1,565 @@
+import pandas as pd
+
+# Force a forgiving encoding and skip broken lines
+df = pd.read_csv(
+    "urlset.csv",
+    encoding="latin1",        # permissive encoding
+    on_bad_lines="skip",      # skip rows with inconsistent columns
+    engine="python"           # python engine handles messy files better
+)
+
+print("Loaded successfully ✅")
+print("\nShape of dataset:", df.shape)
+print("\nColumn names:", df.columns.tolist())
+print("\nFirst 5 rows:\n", df.head())
+
+Loaded successfully ✅
+
+Shape of dataset: (95991, 14)
+
+Column names: ['domain', 'ranking', 'mld_res', 'mld.ps_res', 'card_rem', 'ratio_Rrem', 'ratio_Arem', 'jaccard_RR', 'jaccard_RA', 'jaccard_AR', 'jaccard_AA', 'jaccard_ARrd', 'jaccard_ARrem', 'label']
+
+First 5 rows:
+                                               domain   ranking mld_res  \
+0  nobell.it/70ffb52d079109dca5664cce6f317373782/...  10000000     1.0   
+1  www.dghjdgf.com/paypal.co.uk/cycgi-bin/webscrc...  10000000     0.0   
+2  serviciosbys.com/paypal.cgi.bin.get-into.herf....  10000000     0.0   
+3  mail.printakid.com/www.online.americanexpress....  10000000     0.0   
+4  thewhiskeydregs.com/wp-content/themes/widescre...  10000000     0.0   
+
+  mld.ps_res  card_rem  ratio_Rrem  ratio_Arem  jaccard_RR  jaccard_RA  \
+0        0.0      18.0  107.611111  107.277778         0.0         0.0   
+1        0.0      11.0  150.636364  152.272727         0.0         0.0   
+2        0.0      14.0   73.500000   72.642857         0.0         0.0   
+3        0.0       6.0  562.000000  590.666667         0.0         0.0   
+4        0.0       8.0   29.000000   24.125000         0.0         0.0   
+
+   jaccard_AR  jaccard_AA  jaccard_ARrd jaccard_ARrem  label  
+0         0.0         0.0           0.8      0.795729    1.0  
+1         0.0         0.0           0.0      0.768577    1.0  
+2         0.0         0.0           0.0      0.726582    1.0  
+3         0.0         0.0           0.0       0.85964    1.0  
+4         0.0         0.0           0.0      0.748971    1.0  
+
+
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+import numpy as np
+
+# --- Clean labels ---
+y = df["label"]
+y = y.replace({True: 1, False: 0})   # if boolean
+y = y.fillna(0)                      # replace NaN labels with 0 (safe default)
+y = y.astype(int)                    # now convert safely
+
+# --- Features ---
+X = df.drop(columns=["label"])
+
+# Identify column groups
+text_col = "domain"
+numeric_cols = [c for c in X.columns if c != text_col]
+
+# --- Define transformers ---
+numeric_transformer = Pipeline(steps=[
+    ("scaler", StandardScaler())
+])
+
+text_transformer = TfidfVectorizer(
+    analyzer="char_wb",     # character n-grams
+    ngram_range=(3, 5),     # IEEE-acceptable feature engineering
+    max_features=5000
+)
+
+# --- Combine into hybrid preprocessor ---
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("text", text_transformer, text_col),
+        ("num", numeric_transformer, numeric_cols)
+    ]
+)
+
+print("✅ Hybrid preprocessing pipeline ready (TF-IDF + scaled numeric features)")
+print("Shape of X:", X.shape, " | Shape of y:", y.shape)
+print("Label distribution:\n", y.value_counts(normalize=True))
+✅ Hybrid preprocessing pipeline ready (TF-IDF + scaled numeric features)
+Shape of X: (95991, 13)  | Shape of y: (95991,)
+Label distribution:
+ label
+0    0.500964
+1    0.499036
+Name: proportion, dtype: float64
+
+# --- CPU-friendly baseline: Hybrid preprocessing + ElasticNet Logistic Regression (saga) ---
+from sklearn.model_selection import train_test_split
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, f1_score,
+    precision_recall_fscore_support, confusion_matrix, classification_report
+)
+import numpy as np
+import pandas as pd
+import scipy
+
+# Reuse X, y, text_col, numeric_cols defined earlier
+# 1) Coerce numeric columns
+X_num = X[numeric_cols].apply(pd.to_numeric, errors="coerce")
+X_proc = X.copy()
+X_proc[numeric_cols] = X_num
+
+# 2) Updated transformers with imputation (robust for messy CSVs)
+numeric_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler(with_mean=True, with_std=True))
+])
+
+# Reuse the TF-IDF defined earlier as `text_transformer`
+# (If you restarted, redefine it identical to above.)
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("text", text_transformer, text_col),
+        ("num", numeric_transformer, numeric_cols),
+    ],
+    sparse_threshold=0.3  # encourage sparse ops for speed/memory
+)
+
+# 3) Stratified train/val/test split
+X_train, X_test, y_train, y_test = train_test_split(
+    X_proc, y, test_size=0.15, stratify=y, random_state=42
+)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train, y_train, test_size=0.1765, stratify=y_train, random_state=42
+)  # 0.1765 of 0.85 ≈ 0.15 overall -> 70/15/15 split
+
+print("Splits -> Train:", X_train.shape, "Val:", X_val.shape, "Test:", X_test.shape)
+
+# 4) ElasticNet Logistic Regression (saga) -> sparse-friendly, fast on CPU
+clf = LogisticRegression(
+    solver="saga",
+    penalty="elasticnet",
+    l1_ratio=0.5,             # mix L1/L2 for sparsity + stability
+    C=1.0,                    # can tune later
+    max_iter=300,
+    n_jobs=-1,
+    class_weight="balanced",  # robust to minor label skew / noise
+    random_state=42
+)
+
+model = Pipeline(steps=[
+    ("prep", preprocessor),
+    ("clf", clf)
+])
+
+# 5) Train
+model.fit(X_train, y_train)
+
+# 6) Validate
+val_proba = model.predict_proba(X_val)[:, 1]
+val_pred = (val_proba >= 0.5).astype(int)
+
+# Metrics
+val_auc = roc_auc_score(y_val, val_proba)
+val_ap = average_precision_score(y_val, val_proba)  # PR-AUC
+prec, rec, f1, _ = precision_recall_fscore_support(y_val, val_pred, average="binary", zero_division=0)
+cm = confusion_matrix(y_val, val_pred)
+
+print("\n=== Validation Metrics (Baseline) ===")
+print(f"ROC-AUC: {val_auc:.4f}")
+print(f"PR-AUC:  {val_ap:.4f}")
+print(f"F1:      {f1:.4f}")
+print(f"Precision: {prec:.4f} | Recall: {rec:.4f}")
+print("\nConfusion Matrix [ [TN, FP], [FN, TP] ]")
+print(cm)
+
+# Optional: brief class report
+print("\nClassification Report:")
+print(classification_report(y_val, val_pred, digits=4))
+
+# 7) Store artifacts for next steps
+baseline_artifacts = {
+    "model": model,
+    "X_val_index": X_val.index.values,
+    "val_proba": val_proba,
+    "val_true": y_val.values
+}
+print("\nArtifacts prepared for conformal calibration & threshold tuning ✅")
+
+
+# --- CPU-friendly baseline: Hybrid preprocessing + ElasticNet Logistic Regression (saga) ---
+from sklearn.model_selection import train_test_split
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, f1_score,
+    precision_recall_fscore_support, confusion_matrix, classification_report
+)
+import numpy as np
+import pandas as pd
+import scipy
+
+# Reuse X, y, text_col, numeric_cols defined earlier
+# 1) Coerce numeric columns
+X_num = X[numeric_cols].apply(pd.to_numeric, errors="coerce")
+X_proc = X.copy()
+X_proc[numeric_cols] = X_num
+
+# 2) Updated transformers with imputation (robust for messy CSVs)
+numeric_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler(with_mean=True, with_std=True))
+])
+
+# Reuse the TF-IDF defined earlier as `text_transformer`
+# (If you restarted, redefine it identical to above.)
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("text", text_transformer, text_col),
+        ("num", numeric_transformer, numeric_cols),
+    ],
+    sparse_threshold=0.3  # encourage sparse ops for speed/memory
+)
+
+# 3) Stratified train/val/test split
+X_train, X_test, y_train, y_test = train_test_split(
+    X_proc, y, test_size=0.15, stratify=y, random_state=42
+)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train, y_train, test_size=0.1765, stratify=y_train, random_state=42
+)  # 0.1765 of 0.85 ≈ 0.15 overall -> 70/15/15 split
+
+print("Splits -> Train:", X_train.shape, "Val:", X_val.shape, "Test:", X_test.shape)
+
+# 4) ElasticNet Logistic Regression (saga) -> sparse-friendly, fast on CPU
+clf = LogisticRegression(
+    solver="saga",
+    penalty="elasticnet",
+    l1_ratio=0.5,             # mix L1/L2 for sparsity + stability
+    C=1.0,                    # can tune later
+    max_iter=300,
+    n_jobs=-1,
+    class_weight="balanced",  # robust to minor label skew / noise
+    random_state=42
+)
+
+model = Pipeline(steps=[
+    ("prep", preprocessor),
+    ("clf", clf)
+])
+
+# 5) Train
+model.fit(X_train, y_train)
+
+# 6) Validate
+val_proba = model.predict_proba(X_val)[:, 1]
+val_pred = (val_proba >= 0.5).astype(int)
+
+# Metrics
+val_auc = roc_auc_score(y_val, val_proba)
+val_ap = average_precision_score(y_val, val_proba)  # PR-AUC
+prec, rec, f1, _ = precision_recall_fscore_support(y_val, val_pred, average="binary", zero_division=0)
+cm = confusion_matrix(y_val, val_pred)
+
+print("\n=== Validation Metrics (Baseline) ===")
+print(f"ROC-AUC: {val_auc:.4f}")
+print(f"PR-AUC:  {val_ap:.4f}")
+print(f"F1:      {f1:.4f}")
+print(f"Precision: {prec:.4f} | Recall: {rec:.4f}")
+print("\nConfusion Matrix [ [TN, FP], [FN, TP] ]")
+print(cm)
+
+# Optional: brief class report
+print("\nClassification Report:")
+print(classification_report(y_val, val_pred, digits=4))
+
+# 7) Store artifacts for next steps
+baseline_artifacts = {
+    "model": model,
+    "X_val_index": X_val.index.values,
+    "val_proba": val_proba,
+    "val_true": y_val.values
+}
+print("\nArtifacts prepared for conformal calibration & threshold tuning ✅")
+Splits -> Train: (67191, 13) Val: (14401, 13) Test: (14399, 13)
+/usr/local/lib/python3.12/dist-packages/sklearn/linear_model/_sag.py:348: ConvergenceWarning: The max_iter was reached which means the coef_ did not converge
+  warnings.warn(
+
+=== Validation Metrics (Baseline) ===
+ROC-AUC: 0.9736
+PR-AUC:  0.9766
+F1:      0.9223
+Precision: 0.9406 | Recall: 0.9048
+
+Confusion Matrix [ [TN, FP], [FN, TP] ]
+[[6803  411]
+ [ 684 6503]]
+
+Classification Report:
+              precision    recall  f1-score   support
+
+           0     0.9086    0.9430    0.9255      7214
+           1     0.9406    0.9048    0.9223      7187
+
+    accuracy                         0.9240     14401
+   macro avg     0.9246    0.9239    0.9239     14401
+weighted avg     0.9246    0.9240    0.9239     14401
+
+
+Artifacts prepared for conformal calibration & threshold tuning ✅
+# --- Conformal Prediction Calibration ---
+import numpy as np
+
+# Grab validation predictions & truths
+val_scores = baseline_artifacts["val_proba"]
+val_true = baseline_artifacts["val_true"]
+
+# Compute nonconformity scores (1 - predicted prob for true class)
+nonconformity = []
+for p, y in zip(val_scores, val_true):
+    if y == 1:
+        nonconformity.append(1 - p)
+    else:
+        nonconformity.append(p)
+nonconformity = np.array(nonconformity)
+
+# Define calibration quantile (95% confidence, i.e. risk ≤ 5%)
+alpha = 0.05
+qhat = np.quantile(nonconformity, 1 - alpha)
+
+print(f"Calibration threshold q̂ (alpha={alpha}): {qhat:.4f}")
+
+# Function to output conformal prediction sets
+def conformal_predict(model, X, qhat, alpha=0.05):
+    """Return prediction sets {0}, {1}, or {0,1} based on conformal scores."""
+    proba = model.predict_proba(X)[:, 1]
+    sets = []
+    for p in proba:
+        pred_set = set()
+        # Class 1 candidate
+        if (1 - p) <= qhat:
+            pred_set.add(1)
+        # Class 0 candidate
+        if p <= qhat:
+            pred_set.add(0)
+        sets.append(pred_set)
+    return sets, proba
+
+# Example: run on validation data
+conf_sets, raw_proba = conformal_predict(baseline_artifacts["model"], X_val, qhat)
+
+# Count how many times we give single-label vs. ambiguous {0,1}
+singletons = sum(len(s) == 1 for s in conf_sets)
+ambiguous = sum(len(s) == 2 for s in conf_sets)
+print(f"\nConformal outputs -> Singletons: {singletons} | Ambiguous: {ambiguous} | Total: {len(conf_sets)}")
+
+# Quick check: empirical coverage (fraction of true labels inside the set)
+coverage = np.mean([val_true[i] in conf_sets[i] for i in range(len(val_true))])
+print(f"Empirical coverage: {coverage:.4f} (target ≥ {1-alpha:.2f}) ✅")
+Calibration threshold q̂ (alpha=0.05): 0.5847
+
+Conformal outputs -> Singletons: 13431 | Ambiguous: 970 | Total: 14401
+Empirical coverage: 0.9500 (target ≥ 0.95) ✅
+# --- Threshold tuning + Chrome-extension-friendly wrapper ---
+from sklearn.metrics import precision_recall_curve
+
+# Compute precision-recall curve on validation set
+precisions, recalls, thresholds = precision_recall_curve(val_true, val_scores)
+
+# Find threshold maximizing F1
+f1_scores = (2 * precisions * recalls) / (precisions + recalls + 1e-9)
+best_idx = np.argmax(f1_scores)
+best_threshold = thresholds[best_idx]
+
+print(f"Optimal threshold for F1: {best_threshold:.4f}")
+print(f"At that threshold -> Precision: {precisions[best_idx]:.4f} | Recall: {recalls[best_idx]:.4f} | F1: {f1_scores[best_idx]:.4f}")
+
+# --- Chrome Extension Ready Prediction Function ---
+def chrome_extension_predict(model, url_row, qhat, threshold=0.5):
+    """
+    Given a single URL row (pandas DataFrame with same cols as X),
+    return prediction dict:
+      - binary_pred: 0 or 1 (based on tuned threshold)
+      - conformal_set: {0}, {1}, or {0,1}
+      - confidence: probability of phishing
+    """
+    # Get probability
+    proba = model.predict_proba(url_row)[:, 1][0]
+
+    # Threshold-based binary decision
+    binary_pred = int(proba >= threshold)
+
+    # Conformal prediction set
+    conf_set = set()
+    if (1 - proba) <= qhat:
+        conf_set.add(1)
+    if proba <= qhat:
+        conf_set.add(0)
+
+    return {
+        "binary_pred": binary_pred,
+        "conformal_set": list(conf_set),
+        "confidence": float(proba)
+    }
+
+# --- Demo with one sample from validation set ---
+sample_idx = X_val.iloc[[0]]
+sample_result = chrome_extension_predict(baseline_artifacts["model"], sample_idx, qhat, threshold=best_threshold)
+
+print("\nSample prediction:")
+print(sample_result)
+Optimal threshold for F1: 0.4646
+At that threshold -> Precision: 0.9298 | Recall: 0.9165 | F1: 0.9231
+
+Sample prediction:
+{'binary_pred': 1, 'conformal_set': [0, 1], 'confidence': 0.48177885033457774}
+# --- Retrain final model on Train+Val, evaluate on Test, then export ---
+import joblib
+from sklearn.metrics import roc_auc_score, average_precision_score, classification_report, confusion_matrix
+
+# Merge Train + Val
+X_train_full = pd.concat([X_train, X_val])
+y_train_full = np.concatenate([y_train, y_val])
+
+# Retrain full pipeline
+final_model = Pipeline(steps=[
+    ("prep", preprocessor),
+    ("clf", LogisticRegression(
+        solver="saga",
+        penalty="elasticnet",
+        l1_ratio=0.5,
+        C=1.0,
+        max_iter=400,
+        n_jobs=-1,
+        class_weight="balanced",
+        random_state=42
+    ))
+])
+
+final_model.fit(X_train_full, y_train_full)
+
+# Evaluate on Test
+test_proba = final_model.predict_proba(X_test)[:, 1]
+test_pred = (test_proba >= best_threshold).astype(int)
+
+test_auc = roc_auc_score(y_test, test_proba)
+test_ap = average_precision_score(y_test, test_proba)
+
+print("\n=== Test Set Metrics ===")
+print(f"ROC-AUC: {test_auc:.4f}")
+print(f"PR-AUC:  {test_ap:.4f}")
+print("\nClassification Report:")
+print(classification_report(y_test, test_pred, digits=4))
+print("Confusion Matrix:")
+print(confusion_matrix(y_test, test_pred))
+
+# Save pipeline + conformal params + threshold
+export_artifacts = {
+    "model": final_model,
+    "qhat": qhat,
+    "best_threshold": best_threshold
+}
+joblib.dump(export_artifacts, "phishing_hybrid_conformal.pkl")
+print("\n✅ Model + calibration params exported as phishing_hybrid_conformal.pkl")
+/usr/local/lib/python3.12/dist-packages/sklearn/linear_model/_sag.py:348: ConvergenceWarning: The max_iter was reached which means the coef_ did not converge
+  warnings.warn(
+
+=== Test Set Metrics ===
+ROC-AUC: 0.9815
+PR-AUC:  0.9839
+
+Classification Report:
+              precision    recall  f1-score   support
+
+           0     0.9277    0.9412    0.9344      7213
+           1     0.9401    0.9264    0.9332      7186
+
+    accuracy                         0.9338     14399
+   macro avg     0.9339    0.9338    0.9338     14399
+weighted avg     0.9339    0.9338    0.9338     14399
+
+Confusion Matrix:
+[[6789  424]
+ [ 529 6657]]
+
+✅ Model + calibration params exported as phishing_hybrid_conformal.pkl
+# predict.py
+import joblib
+import pandas as pd
+
+# Load artifacts
+artifacts = joblib.load("phishing_hybrid_conformal.pkl")
+model = artifacts["model"]
+qhat = artifacts["qhat"]
+threshold = artifacts["best_threshold"]
+
+def predict_url(sample_dict):
+    """
+    Input:
+      sample_dict -> dictionary with all feature keys
+         {
+           "domain": "example.com/login",
+           "ranking": 10000000,
+           "mld_res": 0.0,
+           "mld.ps_res": 0.0,
+           "card_rem": 12.0,
+           "ratio_Rrem": 150.6,
+           ...
+         }
+    Output:
+      dict with binary_pred, conformal_set, confidence
+    """
+    # Wrap into DataFrame
+    sample_df = pd.DataFrame([sample_dict])
+
+    # Predict probability
+    proba = model.predict_proba(sample_df)[:, 1][0]
+
+    # Threshold-based decision
+    binary_pred = int(proba >= threshold)
+
+    # Conformal prediction set
+    conf_set = set()
+    if (1 - proba) <= qhat:
+        conf_set.add(1)
+    if proba <= qhat:
+        conf_set.add(0)
+
+    return {
+        "binary_pred": binary_pred,
+        "conformal_set": list(conf_set),
+        "confidence": float(proba)
+    }
+
+# --- Example usage ---
+if __name__ == "__main__":
+    # Demo with dummy row (replace with real preprocessing in extension backend)
+    sample = {
+        "domain": "paypal-security-check.com/login",
+        "ranking": 10000000,
+        "mld_res": 0.0,
+        "mld.ps_res": 0.0,
+        "card_rem": 12.0,
+        "ratio_Rrem": 150.6,
+        "ratio_Arem": 152.3,
+        "jaccard_RR": 0.0,
+        "jaccard_RA": 0.0,
+        "jaccard_AR": 0.0,
+        "jaccard_AA": 0.0,
+        "jaccard_ARrd": 0.0,
+        "jaccard_ARrem": 0.72
+    }
+    result = predict_url(sample)
+    print(result)
+{'binary_pred': 1, 'conformal_set': [1], 'confidence': 0.9980966448969385}
