@@ -651,11 +651,11 @@ A Chrome extension is a small software program that modifies the Chrome browser'
 
 ```
 phishing-extension/
-├── manifest.json      # Extension configuration & permissions
-├── popup.html         # User interface (what users see)
-├── popup.js          # JavaScript logic (what happens when user clicks)
-├── icon16.png        # Extension icon (appears in toolbar)
-└── icon48.png (optional)
+├── manifest.json      
+├── popup.html         
+├── popup.js          
+├── icon16.png        
+
 ```
 
 ### 3. **Detailed Breakdown of manifest.json**
